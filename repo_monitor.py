@@ -236,36 +236,53 @@ def fetch_sofr_data():
 
 def fetch_effr_data():
     """
-    从网络数据源获取 EFFR (Effective Federal Funds Rate)
-    网络不可用时直接返回None，不使用本地参考数据
+    从纽约联储官方API获取 EFFR (Effective Federal Funds Rate)
+    如果当天数据获取不到，会自动回溯到前几天的数据
+    使用官方数据源：https://markets.newyorkfed.org/api/rates/unsecured/effr/last/1.json
     """
-    # 只尝试当天的数据，如果获取不到就直接失败
-    target_date = datetime.now().date()
-    target_date_str = target_date.strftime('%Y-%m-%d')
+    # 尝试回溯最多7天的数据
+    for days_back in range(8):  # 0-7天
+        target_date = datetime.now().date() - timedelta(days=days_back)
+        target_date_str = target_date.strftime('%Y-%m-%d')
 
-    logging.info(f"尝试获取 {target_date_str} 的 EFFR 数据...")
+        # 跳过周末（周六日通常没有交易数据）
+        if target_date.weekday() >= 5:  # 5=周六, 6=周日
+            continue
 
-    # 尝试方案 1：从 Board of Governors 数据源获取
-    try:
-        url = "https://www.federalreserve.gov/datadownload/Choose.aspx?rel=H.15"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(url, headers=headers, timeout=3)  # 更短的超时时间
+        logging.info(f"尝试获取 {target_date_str} 的 EFFR 数据...")
 
-        if response.status_code == 200:
-            match = re.search(r'(\d+\.\d{2,4})\s*%', response.text)
-            if match:
-                value = float(match.group(1))
-                logging.info(f"✅ 成功从 Federal Reserve 获取 {target_date_str} 的 EFFR: {value}%")
-                return {
-                    'date': pd.to_datetime(target_date),
-                    'value': value,
-                    'description': f'EFFR 实际联邦基金利率 ({target_date_str})'
-                }
-    except Exception as e:
-        logging.warning(f"从 Federal Reserve 获取 {target_date_str} 的 EFFR 失败: {e}")
+        # 从纽约联储官方API获取数据
+        try:
+            url = "https://markets.newyorkfed.org/api/rates/unsecured/effr/last/1.json"
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+            response = requests.get(url, headers=headers, timeout=5)
 
-    # 如果网络获取失败，直接返回None
-    logging.error("无法从网络获取 EFFR 数据")
+            if response.status_code == 200:
+                data = response.json()
+
+                # 解析API响应
+                if 'refRates' in data and len(data['refRates']) > 0:
+                    rate_data = data['refRates'][0]
+                    effective_date = pd.to_datetime(rate_data['effectiveDate']).date()
+                    effr_value = rate_data['percentRate']
+
+                    # 检查数据是否足够接近目标日期（允许1-2天的差异）
+                    date_diff = abs((effective_date - target_date).days)
+                    if date_diff <= 2:  # 如果数据日期与目标日期相差不超过2天
+                        logging.info(f"✅ 成功从纽约联储获取 EFFR: {effr_value}% (日期: {rate_data['effectiveDate']})")
+                        return {
+                            'date': pd.to_datetime(effective_date),
+                            'value': effr_value,
+                            'description': f'EFFR 实际联邦基金利率 ({rate_data["effectiveDate"]})'
+                        }
+                    else:
+                        logging.info(f"API返回的数据日期 {rate_data['effectiveDate']} 与目标日期 {target_date_str} 相差 {date_diff} 天，尝试其他日期")
+
+        except Exception as e:
+            logging.warning(f"从纽约联储获取 {target_date_str} 的 EFFR 失败: {e}")
+
+    # 如果所有网络获取都失败，返回None
+    logging.error("无法从纽约联储获取 EFFR 数据")
     return None
 
 def fetch_market_data():
